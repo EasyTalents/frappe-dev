@@ -1,0 +1,54 @@
+{
+  "name": "Frappe v15 Dev (Generic)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+
+  // Features: Node 18 + Python 3.11 (compatibles Frappe v15)
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "18" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
+  },
+
+  // Recommandé pour Coder/devcontainers
+  "init": true,
+  "overrideCommand": false,
+  "remoteUser": "vscode",
+
+  // VS Code extensions utiles (facultatif)
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.debugpy",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+
+  // Ports utilisés par Frappe stack
+  "forwardPorts": [8000, 3306, 6379],
+  "portsAttributes": {
+    "8000": { "label": "Frappe Web" },
+    "3306": { "label": "MariaDB" },
+    "6379": { "label": "Redis" }
+  },
+
+  // Variables (tu peux adapter)
+  "containerEnv": {
+    "FRAPPE_BRANCH": "version-15",
+    "SITE_NAME": "dev.localhost",
+    "ADMIN_PASSWORD": "admin",
+    "DB_ROOT_USER": "root",
+    "DB_ROOT_PASSWORD": "root",
+
+    // Laisse vide = aucune app custom installée.
+    // Pour installer une app, mets l’URL git (ex: https://github.com/org/app.git)
+    "PHARMTEK_APP_URL": "",
+    "PHARMTEK_APP_BRANCH": "develop"
+  },
+
+  // 1) Provision complète au premier build
+  "postCreateCommand": "bash -lc 'chmod +x .devcontainer/scripts/init.sh && .devcontainer/scripts/init.sh'",
+
+  // 2) À chaque (re)start: relancer services + bench
+  "postStartCommand": "bash -lc \"(sudo service mariadb start || sudo service mysql start || true); (sudo service redis-server start || true); (cd ~/frappe-bench && nohup bench start >/tmp/bench.log 2>&1 &)\""
+}
