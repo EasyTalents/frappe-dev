@@ -2,7 +2,6 @@
   "name": "Frappe v15 Dev (Generic)",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
 
-  // Node 18 + Python 3.11 -> compatibles Frappe v15
   "features": {
     "ghcr.io/devcontainers/features/node:1": { "version": "18" },
     "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
@@ -10,6 +9,9 @@
 
   "init": true,
   "overrideCommand": false,
+
+  // ⇣ important pour éviter d’être root
+  "containerUser": "vscode",
   "remoteUser": "vscode",
 
   "customizations": {
@@ -22,7 +24,6 @@
     }
   },
 
-  // Ports stack Frappe
   "forwardPorts": [8000, 3306, 6379],
   "portsAttributes": {
     "8000": { "label": "Frappe Web" },
@@ -30,22 +31,29 @@
     "6379": { "label": "Redis" }
   },
 
-  // Variables - génériques (aucune app custom par défaut)
   "containerEnv": {
     "FRAPPE_BRANCH": "version-15",
     "SITE_NAME": "dev.localhost",
     "ADMIN_PASSWORD": "admin",
     "DB_ROOT_USER": "root",
-    "DB_ROOT_PASSWORD": "root",
+    "DB_ROOT_PASSWORD": "123",
 
-    // Laisse vide => aucune app custom installée.
     "CUSTOM_APP_URL": "",
-    "CUSTOM_APP_BRANCH": "develop"
+    "CUSTOM_APP_BRANCH": "develop",
+
+    // Bench dans /workspaces
+    "BENCH_HOME": "/workspaces/frappe-bench"
   },
 
-  // Provision complet au 1er build
-  "postCreateCommand": "bash -lc 'chmod +x .devcontainer/scripts/init.sh && .devcontainer/scripts/init.sh'",
+  // Provision à la création (log → /tmp/init.log)
+  "onCreateCommand": "bash -lc 'set -euxo pipefail; chmod +x .devcontainer/scripts/init.sh; .devcontainer/scripts/init.sh |& tee /tmp/init.log'",
 
-  // À chaque (re)start : relancer DB/Redis + bench
-  "postStartCommand": "bash -lc \"(sudo service mariadb start || sudo service mysql start || true); (sudo service redis-server start || true); (cd ~/frappe-bench && nohup bench start >/tmp/bench.log 2>&1 &)\""
+  // Deuxième filet de sécurité, juste après la création
+  "postCreateCommand": "bash -lc 'set -euxo pipefail; chmod +x .devcontainer/scripts/init.sh; .devcontainer/scripts/init.sh |& tee -a /tmp/init.log'",
+
+  // Quand l’IDE s’attache: si bench absent → init; puis démarre bench
+  "postAttachCommand": "bash -lc 'if [ ! -d \"/workspaces/frappe-bench\" ]; then set -euxo pipefail; .devcontainer/scripts/init.sh |& tee -a /tmp/init.log; fi; (cd /workspaces/frappe-bench && nohup bench start >/tmp/bench.log 2>&1 &) || true'",
+
+  // À chaque (re)start: services + bench
+  "postStartCommand": "bash -lc \"(sudo service mariadb start || sudo service mysql start || true); (sudo service redis-server start || true); (cd /workspaces/frappe-bench && nohup bench start >/tmp/bench.log 2>&1 &)\""
 }
