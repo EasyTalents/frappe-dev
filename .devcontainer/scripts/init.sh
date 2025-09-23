@@ -1,179 +1,240 @@
 #!/usr/bin/env bash
+# Frappe Dev (mono-container) — init.sh
+# Idempotent, verbeux, avec diagnostics. Conçu pour VS Code Devcontainer / Coder.
 set -euo pipefail
 
-#######################################################################
-# Frappe Dev – init.sh (mono-container, bench 5.x)
-#######################################################################
+#############################
+# Journal & helpers
+#############################
+LOGFILE=${LOGFILE:-/tmp/init.log}
+mkdir -p "$(dirname "$LOGFILE")"
+# journaliser stdout/stderr vers le fichier et la console
+exec > >(tee -a "$LOGFILE") 2>&1
 
-# ---- Paramètres (surchargeables via devcontainer.json -> containerEnv)
+RED=$'\033[1;31m'; GRN=$'\033[1;32m'; YLW=$'\033[1;33m'; BLU=$'\033[1;34m'; RST=$'\033[0m'
+section(){ printf "\n${BLU}==> %s${RST}\n" "$*"; }
+ok(){ printf "${GRN}[OK]${RST} %s\n" "$*"; }
+warn(){ printf "${YLW}[WARN]${RST} %s\n" "$*"; }
+fail(){ printf "${RED}[FAIL]${RST} %s\n" "$*"; }
+need_cmd(){ command -v "$1" >/dev/null 2>&1 || { fail "Commande manquante: $1"; return 1; }; }
+
+#############################
+# Paramètres (surchageables)
+#############################
 FRAPPE_BRANCH="${FRAPPE_BRANCH:-version-15}"
 SITE_NAME="${SITE_NAME:-dev.localhost}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 
 DB_ROOT_USER="${DB_ROOT_USER:-root}"
-DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-123}"   # mets ici ton vrai mdp si différent
+DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-123}"
 
+# Bench sous /workspaces
 BENCH_HOME="${BENCH_HOME:-/workspaces/frappe-bench}"
+
+# Utilisateur dev (devcontainer par défaut)
 DEVUSER="${CONTAINER_USER:-vscode}"
+id "$DEVUSER" >/dev/null 2>&1 || DEVUSER="vscode"
 
-# ---- Helpers
-log()  { printf "\n\033[1;32m[INIT]\033[0m %s\n" "$*"; }
-warn() { printf "\n\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-err()  { printf "\n\033[1;31m[ERR]\033[0m %s\n" "$*" >&2; }
+# Forcer pipx dans le HOME de l’utilisateur (évite /usr/local/py-utils)
+export PIPX_HOME="${PIPX_HOME:-/home/${DEVUSER}/.local/pipx}"
+export PIPX_BIN_DIR="${PIPX_BIN_DIR:-/home/${DEVUSER}/.local/bin}"
+export PATH="$PIPX_BIN_DIR:$PATH"
 
-as_devuser() {
-  local cmd="$*"
-  if [ "$(id -un)" = "$DEVUSER" ]; then
-    bash -lc "$cmd"
-  elif command -v runuser >/dev/null 2>&1; then
-    runuser -u "$DEVUSER" -- bash -lc "$cmd"
-  else
-    su -s /bin/bash "$DEVUSER" -c "$cmd"
-  fi
-}
+section "Contexte"
+echo "LOGFILE        : $LOGFILE"
+echo "DEVUSER        : $DEVUSER"
+echo "FRAPPE_BRANCH  : $FRAPPE_BRANCH"
+echo "BENCH_HOME     : $BENCH_HOME"
+echo "SITE_NAME      : $SITE_NAME"
+echo "DB_ROOT_USER   : $DB_ROOT_USER"
+echo "DB_ROOT_PASS   : (masqué)"
 
-# ---- Préparation de base
-if ! id "$DEVUSER" >/dev/null 2>&1; then
-  warn "Utilisateur $DEVUSER introuvable; utilisation de $(id -un)"
-  DEVUSER="$(id -un)"
-fi
-
-sudo mkdir -p /workspaces
-sudo chown -R "$DEVUSER:$DEVUSER" /workspaces || true
-
-# ---- 1) Packages
-log "Installation des paquets requis (MariaDB, Redis, wkhtmltopdf, fonts, npm/yarn, cron)"
+#############################
+# Paquets système
+#############################
+section "Installation des prérequis système"
 sudo apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  mariadb-server redis-server \
+  cron mariadb-server redis-server \
   curl git build-essential \
   python3.11-venv python3.11-dev python3-pip \
-  xfonts-75dpi xfonts-base fontconfig \
-  wkhtmltopdf \
-  npm \
-  cron
+  xfonts-75dpi xfonts-base fontconfig wkhtmltopdf
 
-# Yarn classic (v1)
+# Yarn classic requis par Frappe v15
 if ! command -v yarn >/dev/null 2>&1; then
   sudo npm i -g yarn@1
 fi
+ok "Pré-requis installés"
 
-# ---- 2) Services
-log "Démarrage MariaDB & Redis"
+#############################
+# Services (MariaDB, Redis)
+#############################
+section "Démarrage des services MariaDB & Redis"
 sudo service mariadb start || sudo service mysql start || true
 sudo service redis-server start || true
 
-# Bind 127.0.0.1 pour dev
+# bind 127.0.0.1 (sécurisant & prévisible)
 if [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
   sudo sed -i 's/^\s*bind-address\s*=.*/bind-address = 127.0.0.1/' /etc/mysql/mariadb.conf.d/50-server.cnf || true
   sudo service mariadb restart || true
 fi
+ok "Services démarrés (ou déjà actifs)"
 
-# Fix root via socket (idempotent)
-log "Configurer root MariaDB via socket (si possible)"
-if sudo mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
-  sudo mysql --protocol=socket -e "ALTER USER '${DB_ROOT_USER}'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}'; FLUSH PRIVILEGES;" || true
+#############################
+# MariaDB root : fixer le mot de passe
+#############################
+section "Configuration root MariaDB"
+set +e
+# 1) essai ping sans mot de passe (nouvelle install typique)
+mysqladmin ping -uroot --silent
+NO_PWD_OK=$?
+# 2) essai ping avec mot de passe fourni
+mysqladmin ping -u"${DB_ROOT_USER}" -p"${DB_ROOT_PASSWORD}" --silent
+WITH_PWD_OK=$?
+set -e
+
+if [ $WITH_PWD_OK -ne 0 ]; then
+  warn "mysqladmin ping avec mot de passe a échoué → tentative via socket pour définir le MDP"
+  sudo mysql --protocol=socket -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}'; FLUSH PRIVILEGES;" || true
+  # reteste
+  if mysqladmin ping -u"${DB_ROOT_USER}" -p"${DB_ROOT_PASSWORD}" --silent; then
+    ok "root MariaDB authentifiable avec le mot de passe fourni"
+  else
+    warn "Impossible de valider l'authent root MariaDB maintenant, on continue (bench new-site demandera --db-root-password)."
+  fi
 else
-  warn "Accès root via socket indisponible (déjà configuré ?). On continue."
+  ok "root MariaDB accessible (sans mot de passe) — MDP sera appliqué lors du new-site si besoin"
 fi
 
-# ---- 3) pipx + bench (dans $HOME de $DEVUSER)
-log "Installer pipx & frappe-bench (avec honcho) pour ${DEVUSER}"
-as_devuser '
-  set -e
-  export PIPX_HOME="$HOME/.local/pipx"
-  export PIPX_BIN_DIR="$HOME/.local/bin"
-  export PATH="$PIPX_BIN_DIR:$HOME/.local/bin:$PATH"
-
-  python3 -m pip install --user -U pipx
+#############################
+# pipx + bench (dans $DEVUSER)
+#############################
+section "Installation de bench via pipx (utilisateur: ${DEVUSER})"
+sudo -u "$DEVUSER" -H bash -lc '
+  set -euo pipefail
+  export PIPX_HOME="${PIPX_HOME:-$HOME/.local/pipx}"
+  export PIPX_BIN_DIR="${PIPX_BIN_DIR:-$HOME/.local/bin}"
+  export PATH="$PIPX_BIN_DIR:$PATH"
+  python3 -m pip install --user -q pipx || true
   python3 -m pipx ensurepath || true
   hash -r
-
-  if ! pipx list | grep -q "package frappe-bench"; then
-    pipx install --python "$(command -v python3.11)" frappe-bench
-  fi
-
-  # Injecter honcho (process manager) si absent
-  if ! pipx runpip frappe-bench show honcho >/dev/null 2>&1; then
-    pipx inject frappe-bench honcho
-  fi
-
+  pipx install frappe-bench || pipx upgrade frappe-bench
+  # bench start a besoin d’honcho
+  pipx inject frappe-bench honcho >/dev/null 2>&1 || true
   bench --version
 '
+ok "bench installé pour ${DEVUSER}"
 
-# ---- 4) Bench init (si absent)
-log "Préparer le bench dans ${BENCH_HOME}"
-sudo mkdir -p "$BENCH_HOME"
-sudo chown -R "$DEVUSER:$DEVUSER" "$BENCH_HOME"
+#############################
+# Bench: détecter / corriger un dossier cassé
+#############################
+section "Vérification existence / validité du bench"
+if [ -d "$BENCH_HOME" ]; then
+  # bench valide = au minimum apps et sites existent après init
+  if [ ! -d "$BENCH_HOME/apps" ] || [ ! -d "$BENCH_HOME/sites" ]; then
+    warn "Bench détecté mais incomplet → déplacement de sauvegarde"
+    mv -v "$BENCH_HOME" "${BENCH_HOME}.broken.$(date +%s)" || true
+  fi
+fi
 
-as_devuser "
-  set -e
-  export PIPX_HOME=\"\$HOME/.local/pipx\"
-  export PIPX_BIN_DIR=\"\$HOME/.local/bin\"
-  export PATH=\"\$PIPX_BIN_DIR:\$HOME/.local/bin:\$PATH\"
+#############################
+# bench init (si absent)
+#############################
+if [ ! -d "$BENCH_HOME" ]; then
+  section "Initialisation du bench (bench init) → $BENCH_HOME"
+  sudo mkdir -p "$BENCH_HOME"
+  sudo chown -R "$DEVUSER:$DEVUSER" "$(dirname "$BENCH_HOME")"
 
-  if [ ! -d '${BENCH_HOME}/apps/frappe' ]; then
+  sudo -u "$DEVUSER" -H bash -lc "
+    set -euo pipefail
+    export PATH=\"$PIPX_BIN_DIR:\$PATH\"
     bench init --skip-redis-config-generation \
                --frappe-branch '${FRAPPE_BRANCH}' \
                --python \$(command -v python3.11) \
                '${BENCH_HOME}'
-  else
-    echo '[INIT] Bench déjà initialisé : ${BENCH_HOME}'
-  fi
-"
+  "
+  ok "bench init terminé"
+else
+  ok "Bench déjà présent : $BENCH_HOME"
+fi
 
-# ---- 5) Config + site (IMPORTANT: exécuter DANS le dossier du bench)
-log "Configurer common_site_config.json et créer le site si besoin"
-as_devuser "
-  set -e
-  export PIPX_HOME=\"\$HOME/.local/pipx\"
-  export PIPX_BIN_DIR=\"\$HOME/.local/bin\"
-  export PATH=\"\$PIPX_BIN_DIR:\$HOME/.local/bin:\$PATH\"
-
+#############################
+# Config commune + création site
+#############################
+section "Configuration common_site_config.json et création du site"
+sudo -u "$DEVUSER" -H bash -lc "
+  set -euo pipefail
+  export PATH=\"$PIPX_BIN_DIR:\$PATH\"
   cd '${BENCH_HOME}'
+  mkdir -p sites
+  [ -f sites/common_site_config.json ] || printf '{}\n' > sites/common_site_config.json
 
-  # Bench 5.x : passer des LITTÉRAUX PYTHON -> donc avec guillemets
+  # IMPORTANT : bench config set-common-config attend des valeurs Python (quotes nécessaires)
   bench config set-common-config -c db_host '\"127.0.0.1\"'
   bench config set-common-config -c redis_cache '\"redis://127.0.0.1:6379\"'
   bench config set-common-config -c redis_queue '\"redis://127.0.0.1:6379\"'
   bench config set-common-config -c redis_socketio '\"redis://127.0.0.1:6379\"'
 
-  # Si ça échoue pour une raison X, fallback JSON
-  if [ \$? -ne 0 ]; then
-    python3 - <<'PY'
-import json, os
-p = os.path.join(\"${BENCH_HOME}\", 'sites', 'common_site_config.json')
-with open(p) as f: cfg=json.load(f)
-cfg['db_host']='127.0.0.1'
-cfg['redis_cache']='redis://127.0.0.1:6379'
-cfg['redis_queue']='redis://127.0.0.1:6379'
-cfg['redis_socketio']='redis://127.0.0.1:6379'
-with open(p,'w') as f: json.dump(cfg,f,indent=2)
-print('common_site_config.json updated (fallback)')
-PY
-  fi
-
-  # Créer le site si absent (commande à lancer DANS le bench)
   if [ ! -d 'sites/${SITE_NAME}' ]; then
     bench new-site '${SITE_NAME}' \
       --db-root-password '${DB_ROOT_PASSWORD}' \
       --admin-password '${ADMIN_PASSWORD}' \
       --mariadb-user-host-login-scope=% \
       --force
-  else
-    echo '[INIT] Site déjà présent : ${SITE_NAME}'
+  fi
+"
+ok "Config bench + site OK"
+
+#############################
+# Démarrage background + diagnostics
+#############################
+section "Démarrage bench (background) et diagnostics"
+sudo -u "$DEVUSER" -H bash -lc "
+  set -euo pipefail
+  export PATH=\"$PIPX_BIN_DIR:\$PATH\"
+  cd '${BENCH_HOME}'
+  if ! pgrep -f 'honcho|bench start' >/dev/null 2>&1; then
+    nohup bench start >/tmp/bench.log 2>&1 &
+    sleep 2
   fi
 "
 
-# ---- 6) Start
-log "Démarrage de bench (background)"
-as_devuser "
-  export PIPX_HOME=\"\$HOME/.local/pipx\"
-  export PIPX_BIN_DIR=\"\$HOME/.local/bin\"
-  export PATH=\"\$PIPX_BIN_DIR:\$HOME/.local/bin:\$PATH\"
-  cd '${BENCH_HOME}' && nohup bench start >/tmp/bench.log 2>&1 &
-"
+# Diagnostics
+DIAG_OK=1
 
-log "OK → http://localhost:8000  | Site: ${SITE_NAME}"
-log "Bench : ${BENCH_HOME}       | User: ${DEVUSER}"
-log "Suivi : tail -n 120 -f /tmp/bench.log"
+echo
+echo "----- DIAGNOSTICS -----"
+if sudo -u "$DEVUSER" -H bash -lc "test -d '$BENCH_HOME/apps' && test -d '$BENCH_HOME/sites'"; then
+  ok "Bench structure OK ($BENCH_HOME)"
+else
+  DIAG_OK=0; fail "Bench structure incomplète ($BENCH_HOME)"
+fi
+
+if mysqladmin ping -u"${DB_ROOT_USER}" -p"${DB_ROOT_PASSWORD}" --silent; then
+  ok "MariaDB: ping avec credentials OK"
+else
+  warn "MariaDB: ping avec credentials NON OK (si le site est créé, ce n’est plus bloquant)"
+fi
+
+if command -v redis-cli >/dev/null 2>&1 && redis-cli ping >/dev/null 2>&1; then
+  ok "Redis: ping OK"
+else
+  warn "Redis: ping KO (vérifier service, mais bench peut démarrer si service redis est up)"
+fi
+
+if ss -ltn '( sport = :8000 )' 2>/dev/null | grep -q 8000; then
+  ok "Port 8000 à l'écoute (bench web)"
+else
+  warn "Port 8000 pas encore à l'écoute (bench en cours de démarrage ?)"
+fi
+
+sudo -u "$DEVUSER" -H bash -lc "tail -n 60 /tmp/bench.log || true"
+
+echo "-----------------------"
+if [ $DIAG_OK -eq 1 ]; then
+  ok "INIT terminé. Frappe sur http://localhost:8000 (site: $SITE_NAME)"
+  echo "Journal complet : $LOGFILE"
+else
+  fail "INIT terminé avec des avertissements/erreurs. Voir $LOGFILE"
+  exit 1
+fi
