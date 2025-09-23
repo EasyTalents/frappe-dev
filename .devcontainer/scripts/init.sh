@@ -1,39 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-########################################################################
-# Frappe Dev – init.sh (mono-container, fidèle à development.md)
-# - bench init --skip-redis-config-generation
-# - bench set-config -g (localhost/127.0.0.1)
-# - bench new-site … --mariadb-user-host-login-scope=%
-# - Bench & site sous /workspaces/frappe-bench
-########################################################################
+#######################################################################
+# Frappe Dev – init.sh (mono-container, bench 5.x)
+# - Installe paquets requis (dont cron), démarre MariaDB/Redis
+# - Fixe le mot de passe root MariaDB via socket si possible
+# - Installe pipx dans $HOME, installe 'frappe-bench' + injecte 'honcho'
+# - Crée/initialise le bench dans /workspaces/frappe-bench
+# - Configure common_site_config.json (localhost + redis 127.0.0.1)
+# - Crée le site dev.localhost si absent
+# - Démarre 'bench start' en arrière-plan
+#
+#   Idempotent : si relancé, il ne casse pas l'existant.
+#######################################################################
 
-# ========= Variables (surchargeables via devcontainer.json) =========
+### Paramètres (surchargeables via devcontainer.json -> "containerEnv")
 FRAPPE_BRANCH="${FRAPPE_BRANCH:-version-15}"
 SITE_NAME="${SITE_NAME:-dev.localhost}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 
-# Mot de passe root MariaDB (doit correspondre à ce que tu mets dans new-site)
 DB_ROOT_USER="${DB_ROOT_USER:-root}"
-DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-123}"
+DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-123}"           # garde 123 si tu l'as appliqué via socket
 
-# App custom (facultatif)
-CUSTOM_APP_URL="${CUSTOM_APP_URL:-}"          # vide => pas d'app
-CUSTOM_APP_BRANCH="${CUSTOM_APP_BRANCH:-develop}"
-
-# Dossier du bench
 BENCH_HOME="${BENCH_HOME:-/workspaces/frappe-bench}"
+DEVUSER="${CONTAINER_USER:-vscode}"                    # utilisateur non-root du conteneur
 
-# Utilisateur non-root souhaité par le devcontainer
-DEVUSER="${CONTAINER_USER:-vscode}"
-
-# ========= Helpers =========
+### Helpers
 log()  { printf "\n\033[1;32m[INIT]\033[0m %s\n" "$*"; }
 warn() { printf "\n\033[1;33m[WARN]\033[0m %s\n" "$*"; }
 err()  { printf "\n\033[1;31m[ERR]\033[0m %s\n" "$*" >&2; }
 
-# Exécuter en tant que DEVUSER (sans dépendre de sudoers)
+# Exécute une commande en tant que $DEVUSER (et évite sudo -u quand on est déjà $DEVUSER)
 as_devuser() {
   local cmd="$*"
   if [ "$(id -un)" = "$DEVUSER" ]; then
@@ -45,14 +42,17 @@ as_devuser() {
   fi
 }
 
-# Assure l'existence de DEVUSER (au cas où)
+### Vérifications de base
 if ! id "$DEVUSER" >/dev/null 2>&1; then
-  warn "Utilisateur $DEVUSER introuvable, utilisation de l'utilisateur courant: $(id -un)"
+  warn "Utilisateur $DEVUSER introuvable; utilisation de l'utilisateur courant: $(id -un)"
   DEVUSER="$(id -un)"
 fi
 
-# ========= Pré-requis système =========
-log "Installation des paquets requis (MariaDB, Redis, wkhtmltopdf, fonts, Node/Yarn, cron)"
+sudo mkdir -p /workspaces
+sudo chown -R "$DEVUSER:$DEVUSER" /workspaces || true
+
+### 1) Paquets système
+log "Installation des paquets requis (MariaDB, Redis, wkhtmltopdf, fonts, npm/yarn, cron)"
 sudo apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   mariadb-server redis-server \
@@ -60,107 +60,109 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3.11-venv python3.11-dev python3-pip \
   xfonts-75dpi xfonts-base fontconfig \
   wkhtmltopdf \
+  npm \
   cron
 
-# Yarn 1.x (classic) – requis pour Frappe v15
+# Yarn classic (v1)
 if ! command -v yarn >/dev/null 2>&1; then
-  if command -v npm >/dev/null 2>&1; then
-    sudo npm i -g yarn@1
-  else
-    warn "npm introuvable, tentative d'installation..."
-    sudo apt-get install -y npm || true
-    sudo npm i -g yarn@1 || true
-  fi
+  sudo npm i -g yarn@1
 fi
 
-# ========= Démarrer Services =========
+### 2) Services
 log "Démarrage MariaDB & Redis"
 sudo service mariadb start || sudo service mysql start || true
 sudo service redis-server start || true
 
-# MariaDB : ajuster bind-address (sécurité dev) + restart
+# Sécurise le bind 127.0.0.1 (dev)
 if [ -f /etc/mysql/mariadb.conf.d/50-server.cnf ]; then
   sudo sed -i 's/^\s*bind-address\s*=.*/bind-address = 127.0.0.1/' /etc/mysql/mariadb.conf.d/50-server.cnf || true
   sudo service mariadb restart || true
 fi
 
-# Config root MariaDB via socket (tolérant)
+# Fix root MariaDB via socket si possible (idempotent)
 log "Configurer root MariaDB via socket (si possible)"
 if sudo mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
   sudo mysql --protocol=socket -e "ALTER USER '${DB_ROOT_USER}'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}'; FLUSH PRIVILEGES;" || true
 else
-  warn "Accès root via socket indisponible (environnement déjà configuré ?). On continue."
+  warn "Accès root via socket indisponible (déjà configuré ?). On continue."
 fi
 
-# ========= pipx + frappe-bench (dans le HOME de DEVUSER) =========
-log "Installer/mettre à jour pipx & frappe-bench pour ${DEVUSER} (dans \$HOME)"
+### 3) pipx + frappe-bench (dans le HOME de $DEVUSER)
+log "Installation pipx & frappe-bench dans le HOME de ${DEVUSER} (avec honcho)"
 as_devuser '
   set -e
   export PIPX_HOME="$HOME/.local/pipx"
   export PIPX_BIN_DIR="$HOME/.local/bin"
   export PATH="$PIPX_BIN_DIR:$HOME/.local/bin:$PATH"
 
-  # pipx utilisateur
   python3 -m pip install --user -U pipx
   python3 -m pipx ensurepath || true
   hash -r
 
-  # (ré)installe bench avec Python 3.11 et injecte honcho (process manager)
-  pipx uninstall frappe-bench || true
-  pipx install --python "$(command -v python3.11)" --force frappe-bench
-  pipx inject frappe-bench honcho
+  # (Ré)installe bench avec Python 3.11 et injecte honcho (process manager)
+  if pipx list | grep -q "package frappe-bench"; then
+    : # laissé tel quel; on garde l’install existante
+  else
+    pipx install --python "$(command -v python3.11)" --force frappe-bench
+  fi
+  # inject honcho si pas déjà présent
+  if ! pipx runpip frappe-bench show honcho >/dev/null 2>&1; then
+    pipx inject frappe-bench honcho
+  fi
 
   bench --version
 '
 
-# ========= bench init --skip-redis-config-generation =========
-log "Préparer le bench (init) dans ${BENCH_HOME}"
+### 4) Bench init
+log "Préparer le bench dans ${BENCH_HOME}"
 sudo mkdir -p "$BENCH_HOME"
-sudo chown -R "$DEVUSER:$DEVUSER" /workspaces
+sudo chown -R "$DEVUSER:$DEVUSER" "$BENCH_HOME"
 
 as_devuser "
   set -e
   export PIPX_HOME=\"\$HOME/.local/pipx\"
   export PIPX_BIN_DIR=\"\$HOME/.local/bin\"
   export PATH=\"\$PIPX_BIN_DIR:\$HOME/.local/bin:\$PATH\"
-  export BENCH_HOME='${BENCH_HOME}'
 
-  # 1) bench init (doc) avec --skip-redis-config-generation
-  if [ ! -d \"\${BENCH_HOME}/apps/frappe\" ]; then
+  if [ ! -d '${BENCH_HOME}/apps/frappe' ]; then
     bench init --skip-redis-config-generation \
                --frappe-branch '${FRAPPE_BRANCH}' \
                --python \$(command -v python3.11) \
-               \"\${BENCH_HOME}\"
+               '${BENCH_HOME}'
+  else
+    echo '[INIT] Bench déjà initialisé : ${BENCH_HOME}'
   fi
+"
 
-  cd \"\${BENCH_HOME}\"
+### 5) Config mono-conteneur + création du site (bench 5.x)
+log "Configurer common_site_config.json et créer le site si besoin"
+as_devuser "
+  set -e
+  export PIPX_HOME=\"\$HOME/.local/pipx\"
+  export PIPX_BIN_DIR=\"\$HOME/.local/bin\"
+  export PATH=\"\$PIPX_BIN_DIR:\$HOME/.local/bin:\$PATH\"
 
-  # 2) Config mono-container: tout en local
-  bench set-config -g db_host 127.0.0.1 || true
-  bench set-config -g redis_cache    redis://127.0.0.1:6379 || true
-  bench set-config -g redis_queue    redis://127.0.0.1:6379 || true
-  bench set-config -g redis_socketio redis://127.0.0.1:6379 || true
+  cd '${BENCH_HOME}'
 
-  # 3) Créer le site si absent (avec scope %)
+  # bench 5.x : set-common-config
+  bench config set-common-config -c db_host 127.0.0.1 || true
+  bench config set-common-config -c redis_cache    'redis://127.0.0.1:6379' || true
+  bench config set-common-config -c redis_queue    'redis://127.0.0.1:6379' || true
+  bench config set-common-config -c redis_socketio 'redis://127.0.0.1:6379' || true
+
+  # Créer le site si absent
   if [ ! -d 'sites/${SITE_NAME}' ]; then
     bench new-site '${SITE_NAME}' \
       --db-root-password '${DB_ROOT_PASSWORD}' \
       --admin-password '${ADMIN_PASSWORD}' \
       --mariadb-user-host-login-scope=% \
       --force
-  fi
-
-  # 4) (Optionnel) App custom
-  if [ -n '${CUSTOM_APP_URL}' ]; then
-    app_name=\$(basename -s .git '${CUSTOM_APP_URL}')
-    if [ ! -d \"apps/\${app_name}\" ]; then
-      bench get-app --branch '${CUSTOM_APP_BRANCH}' '${CUSTOM_APP_URL}'
-    fi
-    bench --site '${SITE_NAME}' install-app \"\${app_name}\" || true
+  else
+    echo '[INIT] Site déjà présent : ${SITE_NAME}'
   fi
 "
 
-# ========= Démarrage bench en arrière-plan =========
+### 6) Démarrage bench
 log "Démarrage de bench (background)"
 as_devuser "
   export PIPX_HOME=\"\$HOME/.local/pipx\"
@@ -170,5 +172,5 @@ as_devuser "
 "
 
 log "OK → http://localhost:8000"
-log "Site: ${SITE_NAME} | Bench: ${BENCH_HOME} | User: ${DEVUSER}"
-log "Suivi des logs : tail -n 120 -f /tmp/bench.log"
+log "Site : ${SITE_NAME} | Bench : ${BENCH_HOME} | User : ${DEVUSER}"
+log "Suivi : tail -n 120 -f /tmp/bench.log"
