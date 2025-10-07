@@ -3,7 +3,9 @@
 set -Eeuo pipefail
 
 ### ---- Paramètres ----
-BENCH_HOME="${BENCH_HOME:-/workspaces/frappe-bench}"
+DEVELOPMENT_ROOT="${DEVELOPMENT_ROOT:-/workspace/development}"
+BENCH_NAME="${BENCH_NAME:-frappe-bench}"
+BENCH_HOME="${BENCH_HOME:-${DEVELOPMENT_ROOT}/${BENCH_NAME}}"
 SITE_NAME="${SITE_NAME:-dev.localhost}"
 FRAPPE_BRANCH="${FRAPPE_BRANCH:-version-15}"
 DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-123}"
@@ -89,8 +91,8 @@ honcho --version >/dev/null || { echo "❌ honcho indisponible"; exit 1; }
 bench --version >/dev/null  || { echo "❌ bench indisponible";  exit 1; }
 
 ### ---- 4) Préparer répertoires ----
-log "Préparer /workspaces & BENCH_HOME"
-ensure_dir "/workspaces"
+log "Préparer development & BENCH_HOME"
+ensure_dir "$DEVELOPMENT_ROOT"
 
 # Si BENCH_HOME existe mais incomplet → backup & recrée
 if [ -d "$BENCH_HOME" ] && [ ! -d "$BENCH_HOME/apps/frappe" ]; then
@@ -106,23 +108,28 @@ fi
 if [ ! -d "$BENCH_HOME/apps/frappe" ]; then
   PYBIN="$(command -v python3.11 || command -v python3)"
   log "bench init → $BENCH_HOME (branch ${FRAPPE_BRANCH}, python $PYBIN)"
-  bench init --skip-redis-config-generation \
-             --frappe-branch "${FRAPPE_BRANCH}" \
-             --python "$PYBIN" \
-             "$BENCH_HOME" | tee /tmp/bench_init.log
+  (cd "$DEVELOPMENT_ROOT" && \
+    bench init --skip-redis-config-generation \
+               --frappe-branch "${FRAPPE_BRANCH}" \
+               --python "$PYBIN" \
+               "$BENCH_NAME") | tee /tmp/bench_init.log
 fi
 
 log "Vérifs structure bench"
 ls -la "$BENCH_HOME"
 ls -la "$BENCH_HOME/apps" "$BENCH_HOME/sites"
 
-### ---- 5) Config DB/Redis (CLI bench modernes) ----
-log "Configurer DB/Redis"
+### ---- 5) Config DB/Redis ----
+log "Configurer DB/Redis (bench set-config -g)"
 cd "$BENCH_HOME"
-bench set-mariadb-host 127.0.0.1 || true
-bench set-redis-cache-host 127.0.0.1 || true
-bench set-redis-queue-host 127.0.0.1 || true
-bench set-redis-socketio-host 127.0.0.1 || true
+bench set-config -g db_host mariadb || true
+bench set-config -g redis_cache redis://redis-cache:6379 || true
+bench set-config -g redis_queue redis://redis-queue:6379 || true
+bench set-config -g redis_socketio redis://redis-queue:6379 || true
+
+### ---- 5 bis) Procfile sans Redis ----
+log "Nettoyer Procfile (suppression entrées Redis)"
+sed -i '/redis/d' Procfile || true
 
 ### ---- 6) Créer le site si absent ----
 log "Créer le site ${SITE_NAME} si besoin"
