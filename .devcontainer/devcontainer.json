@@ -39,9 +39,18 @@
 
   "forwardPorts": [8000, 9000, 9001, 3306],
 
-  "postCreateCommand": "bash -lc 'chmod +x .devcontainer/scripts/init.sh && .devcontainer/scripts/init.sh |& tee -a /tmp/init.log'",
+  "postCreateCommand": [
+    "/bin/bash",
+    ".devcontainer/scripts/init.sh"
+  ],
 
-  "postAttachCommand": "bash -lc 'if [ -d \"${BENCH_HOME:-/workspaces/frappe-bench}\" ]; then (pgrep -f \"bench start\" >/dev/null || nohup bench start >/tmp/bench.log 2>&1 &) || true; fi'",
+  "postAttachCommand": [
+    "/bin/bash",
+    ".devcontainer/scripts/post-attach.sh"
+  ],
 
-  "postStartCommand": "bash -lc '(sudo service mariadb start || true) && (sudo service mysql start || true) && (sudo service redis-server start || true) && if [ -d \"${BENCH_HOME:-/workspaces/frappe-bench}\" ]; then (pgrep -f \"bench start\" >/dev/null || nohup bench start >/tmp/bench.log 2>&1 &) || true; fi'"
+  "postStartCommand": [
+    "/bin/bash",
+    ".devcontainer/scripts/post-start.sh"
+  ]
 }
