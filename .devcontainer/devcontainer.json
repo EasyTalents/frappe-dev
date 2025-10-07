@@ -10,7 +10,6 @@
   "init": true,
   "overrideCommand": false,
 
-  // ⇣ important pour éviter d’être root
   "containerUser": "vscode",
   "remoteUser": "vscode",
 
@@ -18,42 +17,31 @@
     "vscode": {
       "extensions": [
         "ms-python.python",
-        "ms-python.debugpy",
-        "ms-azuretools.vscode-docker"
-      ]
+        "ms-python.vscode-pylance",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "files.trimTrailingWhitespace": true
+      }
     }
   },
 
-  "forwardPorts": [8000, 3306, 6379],
-  "portsAttributes": {
-    "8000": { "label": "Frappe Web" },
-    "3306": { "label": "MariaDB" },
-    "6379": { "label": "Redis" }
-  },
-
   "containerEnv": {
-    "FRAPPE_BRANCH": "version-15",
+    "BENCH_HOME": "/workspaces/frappe-bench",
     "SITE_NAME": "dev.localhost",
-    "ADMIN_PASSWORD": "admin",
-    "DB_ROOT_USER": "root",
+    "FRAPPE_BRANCH": "version-15",
     "DB_ROOT_PASSWORD": "123",
-
-    "CUSTOM_APP_URL": "",
-    "CUSTOM_APP_BRANCH": "develop",
-
-    // Bench dans /workspaces
-    "BENCH_HOME": "/workspaces/frappe-bench"
+    "ADMIN_PASSWORD": "admin",
+    "SOCKETIO_PORT": "9000"
   },
 
-  // Provision à la création (log → /tmp/init.log)
-  "onCreateCommand": "bash -lc 'set -euxo pipefail; chmod +x .devcontainer/scripts/init.sh; .devcontainer/scripts/init.sh |& tee /tmp/init.log'",
+  "forwardPorts": [8000, 9000, 9001, 3306],
 
-  // Deuxième filet de sécurité, juste après la création
-  "postCreateCommand": "bash -lc 'set -euxo pipefail; chmod +x .devcontainer/scripts/init.sh; .devcontainer/scripts/init.sh |& tee -a /tmp/init.log'",
+  "postCreateCommand": "bash -lc 'chmod +x .devcontainer/scripts/init.sh && .devcontainer/scripts/init.sh |& tee -a /tmp/init.log'",
 
-  // Quand l’IDE s’attache: si bench absent → init; puis démarre bench
-  "postAttachCommand": "bash -lc 'if [ ! -d \"/workspaces/frappe-bench\" ]; then set -euxo pipefail; .devcontainer/scripts/init.sh |& tee -a /tmp/init.log; fi; (cd /workspaces/frappe-bench && nohup bench start >/tmp/bench.log 2>&1 &) || true'",
+  "postAttachCommand": "bash -lc 'if [ -d \"${BENCH_HOME:-/workspaces/frappe-bench}\" ]; then (pgrep -f \"bench start\" >/dev/null || nohup bench start >/tmp/bench.log 2>&1 &) || true; fi'",
 
-  // À chaque (re)start: services + bench
-  "postStartCommand": "bash -lc \"(sudo service mariadb start || sudo service mysql start || true); (sudo service redis-server start || true); (cd /workspaces/frappe-bench && nohup bench start >/tmp/bench.log 2>&1 &)\""
+  "postStartCommand": "bash -lc '(sudo service mariadb start || true) && (sudo service mysql start || true) && (sudo service redis-server start || true) && if [ -d \"${BENCH_HOME:-/workspaces/frappe-bench}\" ]; then (pgrep -f \"bench start\" >/dev/null || nohup bench start >/tmp/bench.log 2>&1 &) || true; fi'"
 }
