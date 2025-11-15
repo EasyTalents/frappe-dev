@@ -1,56 +1,34 @@
 {
-  "name": "Frappe v15 Dev (Generic)",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
-
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "18" },
-    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
-  },
-
-  "init": true,
-  "overrideCommand": false,
-
-  "containerUser": "vscode",
-  "remoteUser": "vscode",
-
+  "name": "Frappe Bench",
+  "forwardPorts": [8000, 9000, 6787],
+  "remoteUser": "frappe",
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance",
-        "dbaeumer.vscode-eslint",
-        "esbenp.prettier-vscode"
+        "ms-vscode.live-server",
+        "grapecity.gc-excelviewer",
+        "mtxr.sqltools",
+        "visualstudioexptteam.vscodeintellicode"
       ],
       "settings": {
-        "terminal.integrated.defaultProfile.linux": "bash",
-        "files.trimTrailingWhitespace": true
+        "terminal.integrated.profiles.linux": {
+          "frappe bash": {
+            "path": "/bin/bash"
+          }
+        },
+        "terminal.integrated.defaultProfile.linux": "frappe bash",
+        "debug.node.autoAttach": "disabled"
       }
     }
   },
-
-  "containerEnv": {
-    "BENCH_HOME": "/workspaces/frappe-bench",
-    "SITE_NAME": "dev.localhost",
-    "FRAPPE_BRANCH": "version-15",
-    "DB_ROOT_PASSWORD": "123",
-    "ADMIN_PASSWORD": "admin",
-    "SOCKETIO_PORT": "9000"
-  },
-
-  "forwardPorts": [8000, 9000, 9001, 3306],
-
-  "postCreateCommand": [
-    "/bin/bash",
-    ".devcontainer/scripts/init.sh"
+  "dockerComposeFile": "./docker-compose.yml",
+  "service": "frappe",
+  "workspaceFolder": "/workspace/development",
+  "shutdownAction": "stopCompose",
+  "mounts": [
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/frappe/.ssh,type=bind,consistency=cached"
   ],
-
-  "postAttachCommand": [
-    "/bin/bash",
-    ".devcontainer/scripts/post-attach.sh"
-  ],
-
-  "postStartCommand": [
-    "/bin/bash",
-    ".devcontainer/scripts/post-start.sh"
-  ]
+  
+  "postCreateCommand": "bash /workspace/development/init-bench.sh"
 }
