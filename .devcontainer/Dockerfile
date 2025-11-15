@@ -28,6 +28,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     npm install -g yarn && \
     rm -rf /var/lib/apt/lists/*
 
+RUN pip3 install honcho
+
 # 3) User "coder" compatible Coder
 RUN useradd -m coder && echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 

@@ -1,23 +1,21 @@
 {
-  "name": "Frappe Dev Bench",
+  "name": "Frappe Bench (Coder)",
 
-  // Image de dev : construite depuis .devcontainer/Dockerfile
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
   },
 
-  // Utilisateur défini dans le Dockerfile
   "remoteUser": "coder",
 
-  // Dossier ouvert par défaut dans VS Code / code-server
-  // Tu verras directement ~/frappe-bench une fois init-bench exécuté
-  "workspaceFolder": "/home/coder",
+  "workspaceFolder": "/workspaces/frappe-dev",
 
-  // Ports Frappe / dev
   "forwardPorts": [8000, 9000, 6787],
 
-  // Extensions & settings VS Code
+  "remoteEnv": {
+    "PATH": "/home/coder/frappe-bench/env/bin:/home/coder/.local/bin:${containerEnv:PATH}"
+  },
+
   "customizations": {
     "vscode": {
       "extensions": [
@@ -39,14 +37,9 @@
     }
   },
 
-  // (Optionnel) Montée de ta clé SSH locale dans le conteneur
-  // Si ça pose problème dans Coder, tu peux supprimer entièrement ce bloc "mounts".
   "mounts": [
-    "source=${localEnv:HOME}/.ssh,target=/home/coder/.ssh,type=bind,consistency=cached"
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/coder/.ssh,type=bind,consistency=cached"
   ],
 
-  // Au premier démarrage du conteneur :
-  // 1) on démarre MariaDB + Redis
-  // 2) on exécute ton script d'init qui crée ~/frappe-bench + development.localhost
-  "postCreateCommand": "sudo service mariadb start && sudo service redis-server start && bash /workspaces/frappe-dev/development/init-bench.sh"
+  "postCreateCommand": "bash .devcontainer/devcontainer-post-create.sh"
 }
