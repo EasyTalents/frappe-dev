@@ -20,6 +20,9 @@ RUN apt-get update && apt-get install -y \
     cron \
     xvfb \
     libfontconfig \
+    pkg-config \
+    libmariadb-dev-compat \
+    libmariadb-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # 2) Node.js 20 (LTS) + Yarn
