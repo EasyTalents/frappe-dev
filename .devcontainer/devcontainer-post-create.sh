@@ -10,6 +10,14 @@ if command -v sudo >/dev/null 2>&1; then
 
   echo "[post-create] Démarrage Redis..."
   sudo service redis-server start || echo "[post-create] Redis déjà démarré ou non disponible"
+
+  echo "[post-create] Configuration de MariaDB (root)..."
+  # On essaie de définir le mot de passe root une bonne fois pour toutes.
+  # Si ça échoue (root déjà configuré, etc.), on ne casse pas le post-create.
+  sudo mysql <<EOF || echo "[post-create] ⚠ Impossible de configurer root MariaDB (ignoré)"
+ALTER USER 'root'@'localhost' IDENTIFIED BY '123';
+FLUSH PRIVILEGES;
+EOF
 fi
 
 # 2) Si un bench existe déjà, on ne tente pas de le recréer
